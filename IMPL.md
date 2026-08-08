@@ -244,7 +244,13 @@ The parser should compare:
 
 rather than the textual prefix.
 
-Define a stable namespace URI for the GPX Cues extension and use it consistently in your GPX-generation tooling.
+The stable namespace URI for the GPX Cues extension is:
+
+```text
+http://example.com/gpxcues
+```
+
+Use this URI consistently in your GPX-generation tooling.
 
 ---
 
@@ -318,6 +324,7 @@ sound
 
 A cue may also contain a `times` element specifying how many times the sound should
 be played (default 1). The `times` element is only meaningful when `sound` is present.
+If `times` is present, it must be a positive integer.
 
 Malformed input should fail explicitly rather than being silently repaired.
 
@@ -328,7 +335,7 @@ GPX error:
 Cue at trackpoint 237 contains neither text nor sound.
 ```
 
-Also verify that referenced sound files are available.
+Also warn if referenced sound files are not yet in the sound registry (see Section 47).
 
 ---
 
@@ -468,12 +475,14 @@ ON_ROUTE
 
 # 12. Determining Whether the Rider Is On Route
 
-The configured `radius` should represent distance from the **route geometry**, not distance from an individual trackpoint.
+The configured `routeDeviationThreshold` should represent the maximum distance
+from the **route geometry** (not from an individual trackpoint) at which the
+rider is still considered ON_ROUTE.
 
 For example:
 
 ```text
-radius = 30m
+routeDeviationThreshold = 30m
 ```
 
 means:
@@ -585,7 +594,7 @@ GPS position
   ↓
 nearest route segment
   ↓
-within radius?
+within routeDeviationThreshold?
 ```
 
 If yes:
@@ -717,7 +726,7 @@ The cue's route position is more important than its geographic coordinate.
 Do not trigger cues only by checking:
 
 ```kotlin
-distance(currentLocation, cue) < radius
+distance(currentLocation, cue) < cueRadius
 ```
 
 This can miss a cue when the user passes through its activation circle between two GPS fixes.
@@ -755,7 +764,7 @@ A cue has been passed when:
 distance(
     segment(previousLocation, currentLocation),
     cuePosition
-) <= radius
+) <= cueRadius
 ```
 
 This catches cues passed between GPS fixes.
@@ -1008,7 +1017,9 @@ off-route.wav
 
 use `SoundPool`.
 
-Preload configured sounds when the ride starts.
+Preload configured sounds when the ride starts, including cue sounds from the
+sound file registry (Section 47) and notification sounds.
+Use WAV or OGG format for compatibility with SoundPool.
 
 Then:
 
@@ -1217,21 +1228,26 @@ Instead use hysteresis.
 Example:
 
 ```text
-ON_ROUTE threshold  = 30m
-OFF_ROUTE threshold = 45m
+ON_ROUTE threshold  = routeDeviationThreshold (30m)
+OFF_ROUTE threshold = routeDeviationThreshold + hysteresis (45m)
 ```
 
 Thus:
 
 ```text
 OFF → ON
-    distance <= 30m
+    distance <= routeDeviationThreshold
 
 ON → OFF
-    distance >= 45m
+    distance >= routeDeviationThreshold + hysteresis
 ```
 
-Start with this as an internal constant rather than a user-facing setting.
+The `routeDeviationThreshold` is the user-configured setting.
+The hysteresis is an internal constant (default 15m).
+
+This accounts for GPS noise: a reading slightly below the threshold won't
+immediately cause a state transition, and a large backward jump due to
+inaccuracy won't reset route progress.
 
 ---
 
@@ -1244,12 +1260,12 @@ A conceptual implementation:
 ```text
 effective threshold =
     min(
-        max(configured radius + hysteresis, GPS accuracy),
+        max(configured routeDeviationThreshold + hysteresis, GPS accuracy),
         maximumAllowed
     )
 ```
 
-Do not allow a very poor GPS accuracy estimate to produce an arbitrarily large route radius.
+Do not allow a very poor GPS accuracy estimate to produce an arbitrarily large route deviation threshold.
 
 ---
 
@@ -1442,7 +1458,8 @@ Use Android DataStore Preferences.
 Persist:
 
 ```text
-radiusMeters
+cueRadiusMeters
+routeDeviationThresholdMeters
 ttsVoiceId
 onTrackSound
 onTrackDistanceMeters
@@ -1472,8 +1489,14 @@ GPX Cues
 Route
     [ Select GPX ]
 
-Location radius
+Cue radius
+    15 m
+
+Route deviation
     30 m
+
+Sound files
+    [ Manage ]
 
 GPS interval
     5 sec
@@ -1539,6 +1562,22 @@ audio/*
 Copy selected files into application-private storage.
 
 Store an internal reference to the copied file rather than depending indefinitely on an external URI.
+
+## Sound File Registry
+
+Sound files are managed through a filename-keyed registry:
+
+- When a GPX cue references a sound by filename (e.g., `chime.wav`), the app
+  looks up the matching file in the registry by basename.
+- The user can import sound files via the configuration screen's "Sound files"
+  section, which opens the Storage Access Framework.
+- Imported files are copied into app-private storage and indexed by filename.
+- The on-track and off-track notification sounds are also selected from this
+  registry.
+- If a cue references a sound filename that is not in the registry, the sound
+  portion of the cue is skipped (the text portion, if present, still plays).
+- Android does not ship standard named sound files that can be reliably
+  referenced by basename, so the user should import their own WAV or OGG files.
 
 ---
 
@@ -1854,11 +1893,11 @@ expected:
 cue fires
 ```
 
-## Outside radius
+## Outside cue radius
 
 ```text
 GPS segment remains 50m from cue
-radius = 30m
+cueRadius = 30m
 
 expected:
 no cue
@@ -2200,7 +2239,8 @@ Then ride it in the real world.
 
 Only after that should the following be tuned:
 
-- route radius
+- cue radius
+- route deviation threshold
 - hysteresis
 - GPS interval
 - recovery search distance
@@ -2214,7 +2254,8 @@ Recommended initial values:
 
 | Setting | Default |
 |---|---:|
-| Route radius | 30 m |
+| Cue radius | 15 m |
+| Route deviation threshold | 30 m |
 | GPS interval | 5 sec |
 | On-track heartbeat | 2 km |
 | Off-route notification | 30 sec |
