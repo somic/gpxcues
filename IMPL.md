@@ -142,10 +142,11 @@ data class TrackPoint(
     val cue: Cue?
 )
 
-sealed class Cue {
-    data class Text(val text: String) : Cue()
-    data class Sound(val filename: String) : Cue()
-}
+data class Cue(
+    val text: String?,
+    val sound: String?,
+    val times: Int = 1
+)
 
 data class Route(
     val trackPoints: List<TrackPoint>
@@ -213,6 +214,22 @@ Sound cue:
     </gpxcues:cue>
 </extensions>
 ```
+
+Combined text, sound, and repetition:
+
+```xml
+<extensions>
+    <gpxcues:cue>
+        <gpxcues:text>turn left in 100 feet</gpxcues:text>
+        <gpxcues:sound>chime.wav</gpxcues:sound>
+        <gpxcues:times>3</gpxcues:times>
+    </gpxcues:cue>
+</extensions>
+```
+
+The `times` element specifies how many times the sound should be played.
+When a cue has both text and sound, the text is spoken first, then the
+sound is played `times` times.
 
 ## XML namespace handling
 
@@ -289,17 +306,18 @@ Before START is enabled, validate:
 - valid route geometry
 - valid cue structure
 
-A cue should contain exactly one supported action:
+A cue may contain one or both of:
 
 ```text
 text
 ```
 
-or:
-
 ```text
 sound
 ```
+
+A cue may also contain a `times` element specifying how many times the sound should
+be played (default 1). The `times` element is only meaningful when `sound` is present.
 
 Malformed input should fail explicitly rather than being silently repaired.
 
@@ -307,7 +325,7 @@ Example:
 
 ```text
 GPX error:
-Cue at trackpoint 237 contains both text and sound.
+Cue at trackpoint 237 contains neither text nor sound.
 ```
 
 Also verify that referenced sound files are available.
@@ -657,7 +675,7 @@ data class RouteCue(
     val routeDistanceMeters: Double,
     val latitude: Double,
     val longitude: Double,
-    val action: Cue
+    val cue: Cue
 )
 ```
 
@@ -675,6 +693,19 @@ sound = "chime.wav"
 Cue #2
 route distance = 2100m
 text = "Cross the bridge"
+
+times is optional (defaults to 1).
+When present, the sound is repeated that many times.
+A cue can have text, sound, or both.
+Example with repetition:
+
+```text
+Cue #3
+route distance = 2500m
+text = "Sharp curve"
+sound = "chime.wav"
+times = 3
+```
 ```
 
 The cue's route position is more important than its geographic coordinate.
@@ -871,11 +902,29 @@ Use:
 ```kotlin
 sealed class PlaybackItem {
     data class Text(val text: String) : PlaybackItem()
-    data class Sound(val filename: String) : PlaybackItem()
+    data class Sound(val filename: String, val times: Int = 1) : PlaybackItem()
 }
 ```
 
 The queue owns a single worker.
+
+When a CueTriggered event is received, the Cue is expanded into one or more
+PlaybackItems:
+
+- If `text` is present, add a Text(text) item.
+- If `sound` is present, add a Sound(filename, times) item.
+
+Items are added in document order (text before sound).
+
+```text
+Cue(text="turn left", sound="chime.wav", times=3)
+    ↓
+[Text("turn left"), Sound("chime.wav", times=3)]
+    ↓
+queue
+```
+
+A new cue must never interrupt an already-playing cue.
 
 Conceptually:
 
@@ -891,6 +940,9 @@ while running:
 
     releaseAudioFocus()
 ```
+
+For a Sound item with times > 1, play plays the sound times times
+and wait until complete waits for all repetitions to finish.
 
 ---
 
@@ -961,8 +1013,8 @@ Preload configured sounds when the ride starts.
 Then:
 
 ```text
-Sound cue → SoundPool
-Text cue  → TextToSpeech
+Sound → SoundPool
+Text  → TextToSpeech
 ```
 
 ---
