@@ -1068,6 +1068,10 @@ The built-in on-track and off-track cues (Section 31–33) are delivered through
 this same path, so they respect the active DeliveryOptions — e.g. a
 sound-based cue plays only when sound delivery is enabled.
 
+All sound files — shipped defaults and user imports, see Section 47 — resolve
+through the local sounds directory and must be short (under ~1 s, under ~250 KB)
+WAV or OGG so `SoundPool` can preload them reliably without `TIMED_OUT` errors.
+
 ---
 
 # 31. On-Track Heartbeat
@@ -1601,7 +1605,7 @@ A map is not necessary for version 1.
 
 # 47. Audio File Selection
 
-Use Storage Access Framework for user-selected sound files.
+Use the Storage Access Framework to import sound files.
 
 Launch:
 
@@ -1612,28 +1616,90 @@ ACTION_OPEN_DOCUMENT
 with:
 
 ```text
+CATEGORY_OPENABLE
+```
+
+and MIME type:
+
+```text
 audio/*
 ```
 
-Copy selected files into application-private storage.
+Allow **multiple** selection so the user can import many sounds at once (e.g.
+a batch downloaded from Freesound or Pixabay). Request persistable read
+permission only where supported.
 
-Store an internal reference to the copied file rather than depending indefinitely on an external URI.
+Copy each selected file into the app's **local sounds directory** (see below)
+and index it by basename. After copying, the app no longer depends on the
+original `content://` URI, so imports survive document revocation or storage
+unmount.
 
 ## Sound File Registry
 
-Sound files are managed through a filename-keyed registry:
+Sound files are managed through a **filename-keyed registry backed by the local
+sounds directory**.
 
 - When a GPX cue references a sound by filename (e.g., `chime.wav`), the app
-  looks up the matching file in the registry by basename.
-- The user can import sound files via the configuration screen's "Sound files"
-  section, which opens the Storage Access Framework.
-- Imported files are copied into app-private storage and indexed by filename.
+  looks up the matching file in the registry **by basename**.
+- The user can import any number of sound files via the configuration screen's
+  "Sound files" section, which opens the Storage Access Framework (multiple
+  selection). Each imported file is copied into the local sounds directory and
+  becomes immediately selectable.
 - The built-in on-track and off-track cue sounds are also selected from this
   registry.
 - If a cue references a sound filename that is not in the registry, the sound
   portion of the cue is skipped (the text portion, if present, still plays).
 - Android does not ship standard named sound files that can be reliably
-  referenced by basename, so the user should import their own WAV or OGG files.
+  referenced by basename, so the app ships its own defaults (see below) and the
+  user can import their own WAV or OGG files.
+
+## Local Sounds Directory
+
+There is a single app-private directory that backs the registry:
+
+```text
+<app-files-dir>/sounds/
+```
+
+(`context.getFilesDir()/sounds`.) Everything selectable in the app lives here,
+so a user who simply drops or imports many files into it gets them all as
+selectable options with no further wiring:
+
+- **Shipped defaults.** On first run, the app copies a small set of default cue
+  sounds (e.g. `on_track.wav`, `off_track.wav`, `chime.wav`, `beep.wav`,
+  `drumstick.wav`, `clap.wav`) from `res/raw` into this directory. Using one
+  source of truth means user imports and shipped defaults are treated
+  identically and can override each other by basename.
+- **User imports.** Files pulled in via the Storage Access Framework above are
+  copied here by basename. Re-importing a file with the same name overwrites the
+  previous copy.
+- **Discovery.** The configuration UI's `Sound files` / `Select sound` pickers
+  are populated by scanning this directory (basename -> selectable item). No
+  external URI persistence is required for playback.
+
+## Downloading Sounds
+
+The app itself never downloads sounds (no network dependency during setup or
+rides). Sources the user can fetch files from and then import into the local
+sounds directory:
+
+- **Pixabay** — Pixabay License (effectively CC0); free for commercial use, no
+  attribution required, redistributable. Good for short UI chimes/beeps/claps.
+  `https://pixabay.com/sound-effects/`
+- **OpenGameArt** — filter to CC0 for license-clean SFX.
+  `https://opengameart.org/`
+- **Freesound** — enormous; **filter by license "Creative Commons 0"** before
+  bundling/importing (CC-BY requires in-app attribution, which is awkward for a
+  sound-effects app). Useful per-type search links:
+  - chimes/dings:
+    `https://freesound.org/search/?q=chime&f=license:"Creative%20Commons%200"`
+  - clicks/blips: same license filter, `q=blip`
+  - rimshot/drumstick: same license filter, `q=drumstick`
+  - claps: same license filter, `q=clap`
+
+For the shipped defaults and any user experiments, prefer short clips
+(**< 1 s**, **< 250 KB**) encoded as **WAV or OGG** so `SoundPool` can preload
+them reliably (see Section 30).
 
 ---
 
