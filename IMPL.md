@@ -5,13 +5,14 @@
 GPX Cues is an Android application that:
 
 1. Loads a GPX file from local storage.
-2. Extracts a predetermined route and cue points from the GPX.
-3. Tracks the user's GPS location while riding or walking.
-4. Determines whether the user is on or off the route.
-5. Detects when the user passes cue locations, including cases where the cue is passed between GPS fixes.
-6. Plays cue sounds or TTS messages sequentially.
-7. Continues operating reliably with the screen off and the phone in a pocket.
-8. Requires no network connection.
+2. The user selects cue delivery options (on-screen, TTS, sound) for this ride or walk.
+3. Extracts a predetermined route and cue points from the GPX.
+4. Tracks the user's GPS location while riding or walking.
+5. Determines whether the user is on or off the route.
+6. Detects when the user passes cue locations, including cases where the cue is passed between GPS fixes.
+7. Delivers cues sequentially via the selected channels: on-screen (visual), TTS (audio), or sounds (audio).
+8. Continues operating reliably with the screen off and the phone in a pocket.
+9. Requires no network connection.
 
 The application should be implemented as a **foreground Android location service backed by a stateful route-tracking engine**.
 
@@ -51,6 +52,7 @@ This is necessary because the route can cross itself or pass through the same la
 │ GPS fixes        │  │                  │
 │ Background       │  │ TTS              │
 │ Foreground svc   │  │ SoundPool        │
+│                  │  │ On-screen display│
 └────────┬─────────┘  │ Audio focus      │
          │            └──────────────────┘
          ▼
@@ -96,6 +98,7 @@ app/
       MainScreen.kt
       ConfigurationScreen.kt
       RideScreen.kt
+      CueOverlay.kt
 
     service/
       RideForegroundService.kt
@@ -622,7 +625,7 @@ START
  ↓
 OFF_ROUTE
  ↓
-play off-route sound
+off-track cue (built-in)
 ```
 
 When the route is subsequently intercepted:
@@ -632,7 +635,7 @@ OFF_ROUTE
  ↓
 ON_ROUTE
  ↓
-play on-route sound
+on-track cue (built-in)
 ```
 
 This gives immediate confirmation of the route state without requiring the user to look at the screen.
@@ -836,6 +839,13 @@ This prevents duplicate delivery when:
 - the audio takes several seconds
 - several cues are queued at once
 
+A cue the rider passes while `OFF_ROUTE` is dropped: it is never delivered
+retroactively when the route is reacquired, because the rider did not actually
+traverse that section of the route. The `deliveredCueIds` set combined with cue
+detection being suspended while off-route (Section 25) ensures each cue is
+delivered at most once, and only along the portion of the route actually
+followed.
+
 ---
 
 # 25. Cue Processing While Off Route
@@ -862,6 +872,10 @@ cue detection resumes
 
 This matches the assumption that the user intends to follow the GPX route.
 
+Cues passed while `OFF_ROUTE` are dropped, not delivered later upon reacquiring the
+route. Detection resumes from the recovered route progress, so only cues ahead of
+the last known on-track position are considered going forward.
+
 ---
 
 # 26. Cue Playback Queue
@@ -883,6 +897,10 @@ Audio
 ```
 
 The playback queue must be serial.
+
+It is initialized with the ride's `DeliveryOptions` (the checkbox selection from the
+main loop) and applies them when expanding each `CueTriggered` event into
+`PlaybackItem`s — see Section 27.
 
 Example:
 
@@ -909,6 +927,12 @@ A new cue must never interrupt an already-playing cue.
 Use:
 
 ```kotlin
+data class DeliveryOptions(
+    val visual: Boolean,
+    val tts: Boolean,
+    val sound: Boolean
+)
+
 sealed class PlaybackItem {
     data class Text(val text: String) : PlaybackItem()
     data class Sound(val filename: String, val times: Int = 1) : PlaybackItem()
@@ -917,11 +941,19 @@ sealed class PlaybackItem {
 
 The queue owns a single worker.
 
-When a CueTriggered event is received, the Cue is expanded into one or more
-PlaybackItems:
+Each cue can be delivered through the channels enabled in `DeliveryOptions`:
+- visual — on-screen display (high brightness, timeout)
+- tts — verbal text through TextToSpeech
+- sound — sound playback through SoundPool
 
-- If `text` is present, add a Text(text) item.
-- If `sound` is present, add a Sound(filename, times) item.
+When a CueTriggered event is received, the Cue is expanded into PlaybackItems
+according to the active DeliveryOptions and document order (text before sound):
+
+- If `text` is present:
+    - if `tts` is enabled, add a Text(text) item delivered through TTS
+    - if `visual` is enabled, the cue text is also shown on-screen (Section 27.1)
+- If `sound` is present and `sound` delivery is enabled, add a Sound(filename, times)
+  item delivered through SoundPool.
 
 Items are added in document order (text before sound).
 
@@ -952,6 +984,15 @@ while running:
 
 For a Sound item with times > 1, play plays the sound times times
 and wait until complete waits for all repetitions to finish.
+
+### 27.1 On-screen display
+
+When visual delivery is enabled, the cue text is shown on-screen at very high
+brightness. The foreground service wakes the screen and presents the cue via the
+active Activity window, then turns the screen off after the configured
+`onScreenTimeoutSeconds` to preserve battery. On-screen delivery is most useful
+when the app is visible; with the screen off and the phone in a pocket, the
+audio channels (TTS and sounds) remain the primary delivery.
 
 ---
 
@@ -1007,26 +1048,25 @@ The playback queue must not start the next item until the TTS utterance has comp
 
 # 30. Sound Playback
 
-For short sound effects such as:
-
-```text
-chime.wav
-on-route.wav
-off-route.wav
-```
-
-use `SoundPool`.
+For short sound effects such as the built-in on-track and off-track cue sounds,
+and cue sounds (e.g. `chime.wav`, `on-route.wav`, `off-route.wav`), use
+`SoundPool`.
 
 Preload configured sounds when the ride starts, including cue sounds from the
 sound file registry (Section 47) and notification sounds.
 Use WAV or OGG format for compatibility with SoundPool.
 
-Then:
+Then, per DeliveryOptions:
 
 ```text
-Sound → SoundPool
-Text  → TextToSpeech
+Sound → SoundPool   (if sound enabled)
+Text  → TTS         (if tts enabled)
+Text  → On-screen   (if visual enabled)
 ```
+
+The built-in on-track and off-track cues (Section 31–33) are delivered through
+this same path, so they respect the active DeliveryOptions — e.g. a
+sound-based cue plays only when sound delivery is enabled.
 
 ---
 
@@ -1053,7 +1093,7 @@ ride
      ↓
 12 km
      ↓
-on-track sound
+on-track cue (built-in)
 ```
 
 Maintain:
@@ -1070,7 +1110,7 @@ routeProgress - lastRouteCueProgress
     >= configuredDistance
 ```
 
-Do not count off-route sounds as route cues.
+Do not count off-track notifications as route cues.
 
 ---
 
@@ -1082,7 +1122,7 @@ When the state changes:
 OFF_ROUTE → ON_ROUTE
 ```
 
-immediately queue the configured on-track sound.
+immediately queue the configured built-in on-track cue.
 
 Example:
 
@@ -1091,11 +1131,11 @@ ON ROUTE
    ↓
 OFF ROUTE
    ↓
-off-route sound
+off-track cue (built-in)
    ↓
 route recovered
    ↓
-on-route sound
+on-track cue (built-in)
 ```
 
 This notification should happen regardless of the normal heartbeat distance.
@@ -1120,7 +1160,7 @@ While still off route:
 
 ```text
 if elapsed >= configured interval:
-    play off-route sound
+    deliver the off-track cue
 ```
 
 Example:
@@ -1167,6 +1207,8 @@ The route engine must tolerate:
 between fixes.
 
 This is another reason cue detection must inspect the movement segment between fixes rather than only the current GPS coordinate.
+
+If GPS is temporarily unavailable, the engine holds its last known state rather than making aggressive route-state transitions; no fresh fix means no cue detection and no state change until a new location arrives.
 
 ---
 
@@ -1461,11 +1503,15 @@ Persist:
 cueRadiusMeters
 routeDeviationThresholdMeters
 ttsVoiceId
-onTrackSound
+deliveryVisual
+deliveryTts
+deliverySound
+onTrackCue
 onTrackDistanceMeters
-offTrackSound
+offTrackCue
 offTrackIntervalSeconds
 gpsIntervalSeconds
+onScreenTimeoutSeconds
 ```
 
 Potentially also persist:
@@ -1489,6 +1535,11 @@ GPX Cues
 Route
     [ Select GPX ]
 
+Cue delivery
+    ☐ On-screen (visual)
+    ☐ TTS (audio)
+    ☑ Sounds (audio)
+
 Cue radius
     15 m
 
@@ -1504,17 +1555,20 @@ GPS interval
 TTS voice
     English (US)
 
-On-track sound
+Built-in on-track cue
     [ Select sound ]
 
-On-track notification
+On-track heartbeat
     Every [ 2.0 ] km without a cue
 
-Off-track sound
+Built-in off-track cue
     [ Select sound ]
 
 Off-track notification
     Every [ 30 ] sec
+
+On-screen notification time
+    5 sec
 
 Background operation
     Battery optimization: Disabled
@@ -1523,6 +1577,8 @@ Background operation
 
               [ START ]
 ```
+
+Cue delivery checkboxes default to the persisted values but can be adjusted per ride.
 
 During a ride:
 
@@ -1572,7 +1628,7 @@ Sound files are managed through a filename-keyed registry:
 - The user can import sound files via the configuration screen's "Sound files"
   section, which opens the Storage Access Framework.
 - Imported files are copied into app-private storage and indexed by filename.
-- The on-track and off-track notification sounds are also selected from this
+- The built-in on-track and off-track cue sounds are also selected from this
   registry.
 - If a cue references a sound filename that is not in the registry, the sound
   portion of the cue is skipped (the text portion, if present, still plays).
@@ -1964,8 +2020,8 @@ ON
 Expected notifications:
 
 ```text
-off-route sound
-on-route sound
+off-track cue
+on-track cue
 ```
 
 exactly once for the corresponding state transitions.
